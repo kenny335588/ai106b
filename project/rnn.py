@@ -1,75 +1,117 @@
-# 導入函式庫
-import numpy as np
-from keras.datasets import mnist
-from keras.utils import np_utils
-from keras.models import Sequential
-from keras.layers import SimpleRNN, Activation, Dense
-from keras.optimizers import Adam
+import tensorflow as tf
+from tensorflow.examples.tutorials.mnist import input_data
 
-# 固定亂數種子，使每次執行產生的亂數都一樣
-np.random.seed(1337)
+# set random seed for comparing the two result calculations
+tf.set_random_seed(1)
+
+# this is data
+mnist = input_data.read_data_sets('MNIST_data', one_hot=True)
+
+# hyperparameters
+lr = 0.001
+training_iters = 100000
+batch_size = 128
+
+n_inputs = 28   # MNIST data input (img shape: 28*28)
+n_steps = 28    # time steps
+n_hidden_units = 128   # neurons in hidden layer
+n_classes = 10      # MNIST classes (0-9 digits)
+
+# tf Graph input
+x = tf.placeholder(tf.float32, [None, n_steps, n_inputs])
+y = tf.placeholder(tf.float32, [None, n_classes])
+
+# Define weights
+weights = {
+    # (28, 128)
+    'in': tf.Variable(tf.random_normal([n_inputs, n_hidden_units])),
+    # (128, 10)
+    'out': tf.Variable(tf.random_normal([n_hidden_units, n_classes]))
+}
+biases = {
+    # (128, )
+    'in': tf.Variable(tf.constant(0.1, shape=[n_hidden_units, ])),
+    # (10, )
+    'out': tf.Variable(tf.constant(0.1, shape=[n_classes, ]))
+}
 
 
-# 載入 MNIST 資料庫的訓練資料，並自動分為『訓練組』及『測試組』
-(X_train, y_train), (X_test, y_test) = mnist.load_data()
+def RNN(X, weights, biases):
+    # hidden layer for input to cell
+    ########################################
 
-# 將 training 的 input 資料轉為3維，並 normalize 把顏色控制在 0 ~ 1 之間
-X_train = X_train.reshape(-1, 28, 28) / 255.      
-X_test = X_test.reshape(-1, 28, 28) / 255.
-y_train = np_utils.to_categorical(y_train, num_classes=10)
-y_test = np_utils.to_categorical(y_test, num_classes=10)
+    # transpose the inputs shape from
+    # X ==> (128 batch * 28 steps, 28 inputs)
+    X = tf.reshape(X, [-1, n_inputs])
+
+    # into hidden
+    # X_in = (128 batch * 28 steps, 128 hidden)
+    X_in = tf.matmul(X, weights['in']) + biases['in']
+    # X_in ==> (128 batch, 28 steps, 128 hidden)
+    X_in = tf.reshape(X_in, [-1, n_steps, n_hidden_units])
+
+    # cell
+    ##########################################
+
+    # basic LSTM Cell.
+    if int((tf.__version__).split('.')[1]) < 12 and int((tf.__version__).split('.')[0]) < 1:
+        cell = tf.nn.rnn_cell.BasicLSTMCell(n_hidden_units, forget_bias=1.0, state_is_tuple=True)
+    else:
+        cell = tf.contrib.rnn.BasicLSTMCell(n_hidden_units)
+    # lstm cell is divided into two parts (c_state, h_state)
+    init_state = cell.zero_state(batch_size, dtype=tf.float32)
+
+    # You have 2 options for following step.
+    # 1: tf.nn.rnn(cell, inputs);
+    # 2: tf.nn.dynamic_rnn(cell, inputs).
+    # If use option 1, you have to modified the shape of X_in, go and check out this:
+    # https://github.com/aymericdamien/TensorFlow-Examples/blob/master/examples/3_NeuralNetworks/recurrent_network.py
+    # In here, we go for option 2.
+    # dynamic_rnn receive Tensor (batch, steps, inputs) or (steps, batch, inputs) as X_in.
+    # Make sure the time_major is changed accordingly.
+    outputs, final_state = tf.nn.dynamic_rnn(cell, X_in, initial_state=init_state, time_major=False)
+
+    # hidden layer for output as the final results
+    #############################################
+    # results = tf.matmul(final_state[1], weights['out']) + biases['out']
+
+    # # or
+    # unpack to list [(batch, outputs)..] * steps
+    if int((tf.__version__).split('.')[1]) < 12 and int((tf.__version__).split('.')[0]) < 1:
+        outputs = tf.unpack(tf.transpose(outputs, [1, 0, 2]))    # states is the last outputs
+    else:
+        outputs = tf.unstack(tf.transpose(outputs, [1,0,2]))
+    results = tf.matmul(outputs[-1], weights['out']) + biases['out']    # shape = (128, 10)
+
+    return results
 
 
-# 建立簡單的線性執行的模型
-model = Sequential()
-# 加 RNN 隱藏層(hidden layer)
-model.add(SimpleRNN(
-    # 如果後端使用tensorflow，batch_input_shape 的 batch_size 需設為 None.
-    # 否則執行 model.evaluate() 會有錯誤產生.
-    batch_input_shape=(None, 28, 28), 
-    units= 50,
-    unroll=True,
-)) 
-# 加 output 層
-model.add(Dense(units=10, kernel_initializer='normal', activation='softmax'))
+pred = RNN(x, weights, biases)
+cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=pred, labels=y))
+train_op = tf.train.AdamOptimizer(lr).minimize(cost)
 
-# 編譯: 選擇損失函數、優化方法及成效衡量方式
-LR = 0.001          # Learning Rate
-adam = Adam(LR)
-model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy']) 
+correct_pred = tf.equal(tf.argmax(pred, 1), tf.argmax(y, 1))
+accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32))
 
-# 一批訓練多少張圖片
-BATCH_SIZE = 50     
-BATCH_INDEX = 0     
-# 訓練模型 4001 次
-for step in range(1, 4001):
-    # data shape = (batch_num, steps, inputs/outputs)
-    X_batch = X_train[BATCH_INDEX: BATCH_INDEX+BATCH_SIZE, :, :]
-    Y_batch = y_train[BATCH_INDEX: BATCH_INDEX+BATCH_SIZE, :]
-    # 逐批訓練
-    loss = model.train_on_batch(X_batch, Y_batch)
-    BATCH_INDEX += BATCH_SIZE
-    BATCH_INDEX = 0 if BATCH_INDEX >= X_train.shape[0] else BATCH_INDEX
-
-    # 每 500 批，顯示測試的準確率
-    if step % 500 == 0:
-        # 模型評估
-        loss, accuracy = model.evaluate(X_test, y_test, batch_size=y_test.shape[0], 
-            verbose=False)
-        print("test loss: {}  test accuracy: {}".format(loss,accuracy))
-        
-
-# 預測(prediction)
-X = X_test[0:10,:]
-predictions = model.predict_classes(X)
-# get prediction result
-print(predictions)
-
-# 模型結構存檔
-from keras.models import model_from_json
-json_string = model.to_json()
-with open("SimpleRNN.config", "w") as text_file:
-    text_file.write(json_string)
-    
-# 模型訓練結果存檔
-model.save_weights("SimpleRNN.weight")
+with tf.Session() as sess:
+    # tf.initialize_all_variables() no long valid from
+    # 2017-03-02 if using tensorflow >= 0.12
+    if int((tf.__version__).split('.')[1]) < 12 and int((tf.__version__).split('.')[0]) < 1:
+        init = tf.initialize_all_variables()
+    else:
+        init = tf.global_variables_initializer()
+    sess.run(init)
+    step = 0
+    while step * batch_size < training_iters:
+        batch_xs, batch_ys = mnist.train.next_batch(batch_size)
+        batch_xs = batch_xs.reshape([batch_size, n_steps, n_inputs])
+        sess.run([train_op], feed_dict={
+            x: batch_xs,
+            y: batch_ys,
+        })
+        if step % 20 == 0:
+            print(sess.run(accuracy, feed_dict={
+            x: batch_xs,
+            y: batch_ys,
+            }))
+        step += 1
